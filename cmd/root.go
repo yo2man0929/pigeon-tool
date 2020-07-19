@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/user"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -29,6 +30,7 @@ var roleName string
 var verbose bool
 var keyPath string
 var certPath string
+var staging bool
 
 func detectSIAKeyCertPair() (e error) {
 	const siaRootDir = "/var/lib/sia"
@@ -148,12 +150,17 @@ func execAthenzUserCertUtility() error {
 	return nil
 }
 
-func execZtsCertUtility(keyPath string, certPath string, roleName string) error {
+func execZtsCertUtility(keyPath string, certPath string, staging bool, roleName string) error {
+	var athenzDomain string
 	log.Println("executing zts-rolecert command-line utility")
 	if roleName == "" {
 		roleName = "pigeon_admin_role"
 	}
-
+	if staging {
+		athenzDomain = "nevec.pigeon.int"
+	} else {
+		athenzDomain = "nevec.pigeon.prod"
+	}
 	// Ensure our path includes all directories where the utility could reside.
 	pathenv, pathset := os.LookupEnv("PATH")
 	if pathset {
@@ -173,7 +180,7 @@ func execZtsCertUtility(keyPath string, certPath string, roleName string) error 
 	cmd := exec.Command(
 		ztsRoleCert, "-svc-key-file", keyPath, "-svc-cert-file", certPath,
 		"-zts", "https://zts.athens.yahoo.com:4443/zts/v1", "-role-domain",
-		"nevec.pigeon.prod", "-role-name", roleName,
+		athenzDomain, "-role-name", roleName,
 		"-dns-domain", "zts.yahoo.cloud", "-role-cert-file", "/tmp/pigeon_admin_role.cert")
 	owriter := io.MultiWriter(os.Stdout)
 	cmd.Stdout = owriter
@@ -265,7 +272,22 @@ func doGeneric(client *http.Client, request *http.Request, expectedCode int) ([]
 	return body, nil
 }
 
-func doPutUseChan(client *http.Client, url string, payload []byte, expectedCode int, ch chan<- []byte) error {
+func doPutUseChan(client *http.Client, url string, payload []byte, expectedCode int, wg *sync.WaitGroup) {
+	defer wg.Done()
+	request, err := http.NewRequest("PUT", url, bytes.NewReader(payload))
+	if err != nil {
+		log.Fatalf("failed to construct PUT request: %s", err.Error())
+	}
+	request.Header.Set("Content-Type", "application/json")
+
+	_, err = doGeneric(client, request, expectedCode)
+	if err != nil {
+		log.Fatalf("%s with error: %s", url, err.Error())
+	}
+}
+
+func doPut(client *http.Client, url string, payload []byte, expectedCode int) error {
+
 	request, err := http.NewRequest("PUT", url, bytes.NewReader(payload))
 	if err != nil {
 		log.Printf("failed to construct PUT request: %s", err.Error())
@@ -273,12 +295,11 @@ func doPutUseChan(client *http.Client, url string, payload []byte, expectedCode 
 	}
 	request.Header.Set("Content-Type", "application/json")
 
-	body, err := doGeneric(client, request, expectedCode)
+	_, err = doGeneric(client, request, expectedCode)
 	if err != nil {
 		log.Printf("%s with error: %s", url, err.Error())
 		return err
 	}
-	ch <- body
 	return nil
 }
 
@@ -344,17 +365,23 @@ var rootCmd = &cobra.Command{
 	Use:   "pigeon-tool",
 	Short: "pigeon queue management",
 	Long: `
+list all namespace
+Eg. pigeon-tool ns-list
+	
+list stuck queue per namespace
+Eg.
+pigeon-tool list -n NevecTW
+pigeon-tool list -n all
+	
+skip a message of the certain queue 	
+Eg. pigeon-tool skip -q CQI.prod.storeeps.set.action::CQO.prod.storeeps.set.action.search.merlin -m d925d129-e4e7-4602-bba4-124bf462bc5c__08959ef907109ef601
+	
+skip all message of the certain queue  	
+Eg. pigeon-tool skip -q CQI.prod.storeeps.set.action::CQO.prod.storeeps.set.action.search.merlin -m all
 
-	Eg. list all namespace
-        pigeon-tool ns-list
-	Eg. list stuck queue per namespace
-        pigeon-tool list -n NevecTW
-        pigeon-tool list -n all
-	Eg. skip a message of the certain queue 	
-        pigeon-tool skip -n Store-TW -q CQI.prod.storeeps.set.action::CQO.prod.storeeps.set.action.search.merlin -m d925d129-e4e7-4602-bba4-124bf462bc5c__08959ef907109ef601
-	Eg. skip all message of the certain queue  	
-        pigeon-tool skip -n Store-TW -q CQI.prod.storeeps.set.action::CQO.prod.storeeps.set.action.search.merlin -m all
-
+ If you want to operate for staging pigeon queue, add -i parameter
+Eg. pigeon-tool -i list -n all
+Eg. pigeon-tool -i skip -q CQI.int.nevec.merchandise.event.all::CQO.int.nevec.merchandise.event.tns.sauroneye -m all
 	`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		// If requested, enable logging.
@@ -383,7 +410,7 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		if err := execZtsCertUtility(keyPath, certPath, roleName); err != nil {
+		if err := execZtsCertUtility(keyPath, certPath, staging, roleName); err != nil {
 			return err
 		}
 
@@ -405,5 +432,6 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&roleName, "role", "r", "pigeon_admin_role", "zts role or you can skip it")
 	rootCmd.PersistentFlags().StringVarP(&keyPath, "key", "k", "", "path to PKI key file or you can skip it")
 	rootCmd.PersistentFlags().StringVarP(&certPath, "certificate", "c", "", "path to PKI certificate file or you can skip it")
+	rootCmd.PersistentFlags().BoolVarP(&staging, "int", "i", false, "operation in int environment")
 	//rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }

@@ -3,7 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -15,13 +15,17 @@ var listCmd = &cobra.Command{
 	Use:   "list",
 	Short: "show stuck pigeon queue",
 	Long: `
-		Eg. pigeon-tool list -n all
-		Eg. pigeon-tool list -n NevecTW
+Eg. pigeon-tool list -n all
+Eg. pigeon-tool list -n NevecTW
 	`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 
 		var pigeon Information
-		pigeon.pigeonHostEndpoint = "https://edge.dist.yahoo.com:4443/roles/v1/roles/nevec_egs_pigeon.HOSTs.prod/members?output=json"
+		if staging {
+			pigeon.pigeonHostEndpoint = "https://edge.dist.yahoo.com:4443/roles/v1/roles/nevec_egs_pigeon.HOSTs.int/members?output=json"
+		} else {
+			pigeon.pigeonHostEndpoint = "https://edge.dist.yahoo.com:4443/roles/v1/roles/nevec_egs_pigeon.HOSTs.prod/members?output=json"
+		}
 		pigeon.StatusURL = "/api/pigeon/v1/status"
 		pigeon.cert = "/tmp/pigeon_admin_role.cert"
 
@@ -43,11 +47,10 @@ var listCmd = &cobra.Command{
 			return err
 		}
 
-		tailPattern, _ := regexp.Compile("tail") // use pattern to get tail list from host api
 		responses := make(chan []byte)
 
 		for _, host := range pigeon.HostList[0].Members {
-			if tailPattern.MatchString(host) {
+			if strings.Contains(host, "tail") {
 				pigeon.tailCount++
 				pigeonStatus := fmt.Sprintf("https://%s:4443%s", host, pigeon.StatusURL)
 				go doGetUseChan(roleClient, pigeonStatus, responses)
@@ -68,7 +71,6 @@ var listCmd = &cobra.Command{
 					}
 
 				} else if v.OldMessageCount != 0 && v.Property == listNamespace {
-					fmt.Println()
 					fmt.Println(pigeon.StatusResult.Host, v.Property, v.SubscriptionName)
 					for _, id := range v.OldMessages {
 						fmt.Println(id)
@@ -83,6 +85,7 @@ var listCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(listCmd)
+
 	listCmd.Flags().StringVarP(&listNamespace, "namespace", "n", "", "namespace or all")
 	listCmd.MarkFlagRequired("namespace")
 }
